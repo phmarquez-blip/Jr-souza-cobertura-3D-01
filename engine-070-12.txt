@@ -1,0 +1,187 @@
+onst in vec3 a) {
+			return SAMPLE_LUMINANCE;
+		}
+
+		const vec3 poissonDisk[SAMPLES] = SAMPLE_VECTORS;
+
+		vec3 getViewPosition( const in vec2 screenPosition, const in float depth ) {
+			#ifdef USE_REVERSED_DEPTH_BUFFER
+				vec4 clipSpacePosition = vec4( vec2( screenPosition ) * 2.0 - 1.0, depth, 1.0 );
+			#else
+				vec4 clipSpacePosition = vec4( vec3( screenPosition, depth ) * 2.0 - 1.0, 1.0 );
+			#endif
+			vec4 viewSpacePosition = cameraProjectionMatrixInverse * clipSpacePosition;
+			return viewSpacePosition.xyz / viewSpacePosition.w;
+		}
+
+		float getDepth(const vec2 uv) {
+		#if DEPTH_VALUE_SOURCE == 1
+			return textureLod(tDepth, uv.xy, 0.0).a;
+		#else
+			return textureLod(tDepth, uv.xy, 0.0).r;
+		#endif
+		}
+
+		float fetchDepth(const ivec2 uv) {
+			#if DEPTH_VALUE_SOURCE == 1
+				return texelFetch(tDepth, uv.xy, 0).a;
+			#else
+				return texelFetch(tDepth, uv.xy, 0).r;
+			#endif
+		}
+
+		vec3 computeNormalFromDepth(const vec2 uv) {
+			vec2 size = vec2(textureSize(tDepth, 0));
+			ivec2 p = ivec2(uv * size);
+			float c0 = fetchDepth(p);
+			float l2 = fetchDepth(p - ivec2(2, 0));
+			float l1 = fetchDepth(p - ivec2(1, 0));
+			float r1 = fetchDepth(p + ivec2(1, 0));
+			float r2 = fetchDepth(p + ivec2(2, 0));
+			float b2 = fetchDepth(p - ivec2(0, 2));
+			float b1 = fetchDepth(p - ivec2(0, 1));
+			float t1 = fetchDepth(p + ivec2(0, 1));
+			float t2 = fetchDepth(p + ivec2(0, 2));
+			float dl = abs((2.0 * l1 - l2) - c0);
+			float dr = abs((2.0 * r1 - r2) - c0);
+			float db = abs((2.0 * b1 - b2) - c0);
+			float dt = abs((2.0 * t1 - t2) - c0);
+			vec3 ce = getViewPosition(uv, c0).xyz;
+			vec3 dpdx = (dl < dr) ?  ce - getViewPosition((uv - vec2(1.0 / size.x, 0.0)), l1).xyz
+									: -ce + getViewPosition((uv + vec2(1.0 / size.x, 0.0)), r1).xyz;
+			vec3 dpdy = (db < dt) ?  ce - getViewPosition((uv - vec2(0.0, 1.0 / size.y)), b1).xyz
+									: -ce + getViewPosition((uv + vec2(0.0, 1.0 / size.y)), t1).xyz;
+			return normalize(cross(dpdx, dpdy));
+		}
+
+		vec3 getViewNormal(const vec2 uv) {
+		#if NORMAL_VECTOR_TYPE == 2
+			return normalize(textureLod(tNormal, uv, 0.).rgb);
+		#elif NORMAL_VECTOR_TYPE == 1
+			return unpackRGBToNormal(textureLod(tNormal, uv, 0.).rgb);
+		#else
+			return computeNormalFromDepth(uv);
+		#endif
+		}
+
+		void denoiseSample(in vec3 center, in vec3 viewNormal, in vec3 viewPos, in vec2 sampleUv, inout vec3 denoised, inout float totalWeight) {
+			vec4 sampleTexel = textureLod(tDiffuse, sampleUv, 0.0);
+			float sampleDepth = getDepth(sampleUv);
+			vec3 sampleNormal = getViewNormal(sampleUv);
+			vec3 neighborColor = sampleTexel.rgb;
+			vec3 viewPosSample = getViewPosition(sampleUv, sampleDepth);
+
+			float normalDiff = dot(viewNormal, sampleNormal);
+			float normalSimilarity = pow(max(normalDiff, 0.), normalPhi);
+			float lumaDiff = abs(getLuminance(neighborColor) - getLuminance(center));
+			float lumaSimilarity = max(1.0 - lumaDiff / lumaPhi, 0.0);
+			float depthDiff = abs(dot(viewPos - viewPosSample, viewNormal));
+			float depthSimilarity = max(1. - depthDiff / depthPhi, 0.);
+			float w = lumaSimilarity * depthSimilarity * normalSimilarity;
+
+			denoised += w * neighborColor;
+			totalWeight += w;
+		}
+
+		void main() {
+			float depth = getDepth(vUv.xy);
+			vec3 viewNormal = getViewNormal(vUv);
+			if (depth == 1. || dot(viewNormal, viewNormal) == 0.) {
+				discard;
+				return;
+			}
+			vec4 texel = textureLod(tDiffuse, vUv, 0.0);
+			vec3 center = texel.rgb;
+			vec3 viewPos = getViewPosition(vUv, depth);
+
+			vec2 noiseResolution = vec2(textureSize(tNoise, 0));
+			vec2 noiseUv = vUv * resolution / noiseResolution;
+			vec4 noiseTexel = textureLod(tNoise, noiseUv, 0.0);
+      		vec2 noiseVec = vec2(sin(noiseTexel[index % 4] * 2. * PI), cos(noiseTexel[index % 4] * 2. * PI));
+    		mat2 rotationMatrix = mat2(noiseVec.x, -noiseVec.y, noiseVec.x, noiseVec.y);
+
+			float totalWeight = 1.0;
+			vec3 denoised = texel.rgb;
+			for (int i = 0; i < SAMPLES; i++) {
+				vec3 sampleDir = poissonDisk[i];
+				vec2 offset = rotationMatrix * (sampleDir.xy * (1. + sampleDir.z * (radius - 1.)) / resolution);
+				vec2 sampleUv = vUv + offset;
+				denoiseSample(center, viewNormal, viewPos, sampleUv, denoised, totalWeight);
+			}
+
+			if (totalWeight > 0.) {
+				denoised /= totalWeight;
+			}
+			gl_FragColor = FRAGMENT_OUTPUT;
+		}`};function Pf(s,t,e){let n=YM(s,t,e),i="vec3[SAMPLES](";for(let r=0;r<s;r++){let a=n[r];i+=`vec3(${a.x}, ${a.y}, ${a.z})${r<s-1?",":")"}`}return i}function YM(s,t,e){let n=[];for(let i=0;i<s;i++){let r=2*Math.PI*t*i/s,a=Math.pow(i/(s-1),e);n.push(new w(Math.cos(r),Math.sin(r),a))}return n}var yu=class{constructor(t=Math){this.grad3=[[1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],[1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],[0,1,1],[0,-1,1],[0,1,-1],[0,-1,-1]],this.grad4=[[0,1,1,1],[0,1,1,-1],[0,1,-1,1],[0,1,-1,-1],[0,-1,1,1],[0,-1,1,-1],[0,-1,-1,1],[0,-1,-1,-1],[1,0,1,1],[1,0,1,-1],[1,0,-1,1],[1,0,-1,-1],[-1,0,1,1],[-1,0,1,-1],[-1,0,-1,1],[-1,0,-1,-1],[1,1,0,1],[1,1,0,-1],[1,-1,0,1],[1,-1,0,-1],[-1,1,0,1],[-1,1,0,-1],[-1,-1,0,1],[-1,-1,0,-1],[1,1,1,0],[1,1,-1,0],[1,-1,1,0],[1,-1,-1,0],[-1,1,1,0],[-1,1,-1,0],[-1,-1,1,0],[-1,-1,-1,0]],this.p=[];for(let e=0;e<256;e++)this.p[e]=Math.floor(t.random()*256);this.perm=[];for(let e=0;e<512;e++)this.perm[e]=this.p[e&255];this.simplex=[[0,1,2,3],[0,1,3,2],[0,0,0,0],[0,2,3,1],[0,0,0,0],[0,0,0,0],[0,0,0,0],[1,2,3,0],[0,2,1,3],[0,0,0,0],[0,3,1,2],[0,3,2,1],[0,0,0,0],[0,0,0,0],[0,0,0,0],[1,3,2,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[1,2,0,3],[0,0,0,0],[1,3,0,2],[0,0,0,0],[0,0,0,0],[0,0,0,0],[2,3,0,1],[2,3,1,0],[1,0,2,3],[1,0,3,2],[0,0,0,0],[0,0,0,0],[0,0,0,0],[2,0,3,1],[0,0,0,0],[2,1,3,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[2,0,1,3],[0,0,0,0],[0,0,0,0],[0,0,0,0],[3,0,1,2],[3,0,2,1],[0,0,0,0],[3,1,2,0],[2,1,0,3],[0,0,0,0],[0,0,0,0],[0,0,0,0],[3,1,0,2],[0,0,0,0],[3,2,0,1],[3,2,1,0]]}noise(t,e){let n,i,r,a=.5*(Math.sqrt(3)-1),o=(t+e)*a,l=Math.floor(t+o),c=Math.floor(e+o),h=(3-Math.sqrt(3))/6,d=(l+c)*h,u=l-d,f=c-d,p=t-u,_=e-f,g,m;p>_?(g=1,m=0):(g=0,m=1);let y=p-g+h,M=_-m+h,x=p-1+2*h,E=_-1+2*h,b=l&255,R=c&255,v=this.perm[b+this.perm[R]]%12,A=this.perm[b+g+this.perm[R+m]]%12,P=this.perm[b+1+this.perm[R+1]]%12,I=.5-p*p-_*_;I<0?n=0:(I*=I,n=I*I*this._dot(this.grad3[v],p,_));let N=.5-y*y-M*M;N<0?i=0:(N*=N,i=N*N*this._dot(this.grad3[A],y,M));let B=.5-x*x-E*E;return B<0?r=0:(B*=B,r=B*B*this._dot(this.grad3[P],x,E)),70*(n+i+r)}noise3d(t,e,n){let i,r,a,o,c=(t+e+n)*.3333333333333333,h=Math.floor(t+c),d=Math.floor(e+c),u=Math.floor(n+c),f=1/6,p=(h+d+u)*f,_=h-p,g=d-p,m=u-p,y=t-_,M=e-g,x=n-m,E,b,R,v,A,P;y>=M?M>=x?(E=1,b=0,R=0,v=1,A=1,P=0):y>=x?(E=1,b=0,R=0,v=1,A=0,P=1):(E=0,b=0,R=1,v=1,A=0,P=1):M<x?(E=0,b=0,R=1,v=0,A=1,P=1):y<x?(E=0,b=1,R=0,v=0,A=1,P=1):(E=0,b=1,R=0,v=1,A=1,P=0);let I=y-E+f,N=M-b+f,B=x-R+f,L=y-v+2*f,z=M-A+2*f,q=x-P+2*f,X=y-1+3*f,it=M-1+3*f,H=x-1+3*f,j=h&255,Q=d&255,wt=u&255,Et=this.perm[j+this.perm[Q+this.perm[wt]]]%12,ie=this.perm[j+E+this.perm[Q+b+this.perm[wt+R]]]%12,Jt=this.perm[j+v+this.perm[Q+A+this.perm[wt+P]]]%12,ee=this.perm[j+1+this.perm[Q+1+this.perm[wt+1]]]%12,Y=.6-y*y-M*M-x*x;Y<0?i=0:(Y*=Y,i=Y*Y*this._dot3(this.grad3[Et],y,M,x));let $=.6-I*I-N*N-B*B;$<0?r=0:($*=$,r=$*$*this._dot3(this.grad3[ie],I,N,B));let ht=.6-L*L-z*z-q*q;ht<0?a=0:(ht*=ht,a=ht*ht*this._dot3(this.grad3[Jt],L,z,q));let Ft=.6-X*X-it*it-H*H;return Ft<0?o=0:(Ft*=Ft,o=Ft*Ft*this._dot3(this.grad3[ee],X,it,H)),32*(i+r+a+o)}noise4d(t,e,n,i){let r=this.grad4,a=this.simplex,o=this.perm,l=(Math.sqrt(5)-1)/4,c=(5-Math.sqrt(5))/20,h,d,u,f,p,_=(t+e+n+i)*l,g=Math.floor(t+_),m=Math.floor(e+_),y=Math.floor(n+_),M=Math.floor(i+_),x=(g+m+y+M)*c,E=g-x,b=m-x,R=y-x,v=M-x,A=t-E,P=e-b,I=n-R,N=i-v,B=A>P?32:0,L=A>I?16:0,z=P>I?8:0,q=A>N?4:0,X=P>N?2:0,it=I>N?1:0,H=B+L+z+q+X+it,j=a[H][0]>=3?1:0,Q=a[H][1]>=3?1:0,wt=a[H][2]>=3?1:0,Et=a[H][3]>=3?1:0,ie=a[H][0]>=2?1:0,Jt=a[H][1]>=2?1:0,ee=a[H][2]>=2?1:0,Y=a[H][3]>=2?1:0,$=a[H][0]>=1?1:0,ht=a[H][1]>=1?1:0,Ft=a[H][2]>=1?1:0,bt=a[H][3]>=1?1:0,Gt=A-j+c,re=P-Q+c,et=I-wt+c,rt=N-Et+c,at=A-ie+2*c,ot=P-Jt+2*c,ct=I-ee+2*c,Vt=N-Y+2*c,Ot=A-$+3*c,Ht=P-ht+3*c,Xt=I-Ft+3*c,D=N-bt+3*c,se=A-1+4*c,$t=P-1+4*c,C=I-1+4*c,S=N-1+4*c,O=g&255,V=m&255,Z=y&255,lt=M&255,ut=o[O+o[V+o[Z+o[lt]]]]%32,J=o[O+j+o[V+Q+o[Z+wt+o[lt+Et]]]]%32,nt=o[O+ie+o[V+Jt+o[Z+ee+o[lt+Y]]]]%32,mt=o[O+$+o[V+ht+o[Z+Ft+o[lt+bt]]]]%32,Nt=o[O+1+o[V+1+o[Z+1+o[lt+1]]]]%32,ft=.6-A*A-P*P-I*I-N*N;ft<0?h=0:(ft*=ft,h=ft*ft*this._dot4(r[ut],A,P,I,N));let dt=.6-Gt*Gt-re*re-et*et-rt*rt;dt<0?d=0:(dt*=dt,d=dt*dt*this._dot4(r[J],Gt,re,et,rt));let Rt=.6-at*at-ot*ot-ct*ct-Vt*Vt;Rt<0?u=0:(Rt*=Rt,u=Rt*Rt*this._dot4(r[nt],at,ot,ct,Vt));let Bt=.6-Ot*Ot-Ht*Ht-Xt*Xt-D*D;Bt<0?f=0:(Bt*=Bt,f=Bt*Bt*this._dot4(r[mt],Ot,Ht,Xt,D));let qt=.6-se*se-$t*$t-C*C-S*S;return qt<0?p=0:(qt*=qt,p=qt*qt*this._dot4(r[Nt],se,$t,C,S)),27*(h+d+u+f+p)}_dot(t,e,n){return t[0]*e+t[1]*n}_dot3(t,e,n,i){return t[0]*e+t[1]*n+t[2]*i}_dot4(t,e,n,i,r){return t[0]*e+t[1]*n+t[2]*i+t[3]*r}};var Xl=class s extends Mn{constructor(t,e,n=512,i=512,r,a,o){super(),this.width=n,this.height=i,this.clear=!0,this.camera=e,this.scene=t,this.output=0,this._renderGBuffer=!0,this._visibilityCache=[],this.blendIntensity=1,this.pdRings=2,this.pdRadiusExponent=2,this.pdSamples=16,this.gtaoNoiseTexture=Og(),this.pdNoiseTexture=this._generateNoise(),this.gtaoRenderTarget=new we(this.width,this.height,{type:Ye,depthBuffer:!1}),this.pdRenderTarget=this.gtaoRenderTarget.clone(),this.gtaoMaterial=new be({defines:Object.assign({},Gl.defines),uniforms:Sn.clone(Gl.uniforms),vertexShader:Gl.vertexShader,fragmentShader:Gl.fragmentShader,blending:Ce,depthTest:!1,depthWrite:!1}),this.gtaoMaterial.defines.PERSPECTIVE_CAMERA=this.camera.isPerspectiveCamera?1:0,this.gtaoMaterial.uniforms.tNoise.value=this.gtaoNoiseTexture,this.gtaoMaterial.uniforms.resolution.value.set(this.width,this.height),this.gtaoMaterial.uniforms.cameraNear.value=this.camera.near,this.gtaoMaterial.uniforms.cameraFar.value=this.camera.far,this.normalMaterial=new xs,this.normalMaterial.blending=Ce,this.pdMaterial=new be({defines:Object.assign({},Wl.defines),uniforms:Sn.clone(Wl.uniforms),vertexShader:Wl.vertexShader,fragmentShader:Wl.fragmentShader,depthTest:!1,depthWrite:!1}),this.pdMaterial.uniforms.tDiffuse.value=this.gtaoRenderTarget.texture,this.pdMaterial.uniforms.tNoise.value=this.pdNoiseTexture,this.pdMaterial.uniforms.resolution.value.set(this.width,this.height),this.pdMaterial.uniforms.lumaPhi.value=10,this.pdMaterial.uniforms.depthPhi.value=2,this.pdMaterial.uniforms.normalPhi.value=3,this.pdMaterial.uniforms.radius.value=8,this.depthRenderMaterial=new be({defines:Object.assign({},Hl.defines),uniforms:Sn.clone(Hl.uniforms),vertexShader:Hl.vertexShader,fragmentShader:Hl.fragmentShader,blending:Ce}),this.depthRenderMaterial.uniforms.cameraNear.value=this.camera.near,this.depthRenderMaterial.uniforms.cameraFar.value=this.camera.far,this.copyMaterial=new be({uniforms:Sn.clone(la.uniforms),vertexShader:la.vertexShader,fragmentShader:la.fragmentShader,transparent:!0,depthTest:!1,depthWrite:!1,blendSrc:zr,blendDst:Xi,blendEquation:vn,blendSrcAlpha:Br,blendDstAlpha:Xi,blendEquationAlpha:vn}),this.blendMaterial=new be({uniforms:Sn.clone(vu.uniforms),vertexShader:vu.vertexShader,fragmentShader:vu.fragmentShader,transparent:!0,depthTest:!1,depthWrite:!1,blending:Zo,blendSrc:zr,blendDst:Xi,blendEquation:vn,blendSrcAlpha:Br,blendDstAlpha:Xi,blendEquationAlpha:vn}),this._fsQuad=new qi(null),this._originalClearColor=new xt,this.setGBuffer(r?r.depthTexture:void 0,r?r.normalTexture:void 0),a!==void 0&&this.updateGtaoMaterial(a),o!==void 0&&this.updatePdMaterial(o)}setSize(t,e){this.width=t,this.height=e,this.gtaoRenderTarget.setSize(t,e),this.normalRenderTarget.setSize(t,e),this.pdRenderTarget.setSize(t,e),this.gtaoMaterial.uniforms.resolution.value.set(t,e),this.gtaoMaterial.uniforms.cameraProjectionMatrix.value.copy(this.camera.projectionMatrix),this.gtaoMaterial.uniforms.cameraProjectionMatrixInverse.value.copy(this.camera.projectionMatrixInverse),this.pdMaterial.uniforms.resolution.value.set(t,e),this.pdMaterial.uniforms.cameraProjectionMatrixInverse.value.copy(this.camera.projectionMatrixInverse)}dispose(){this.gtaoNoiseTexture.dispose(),this.pdNoiseTexture.dispose(),this.normalRenderTarget.dispose(),this.gtaoRenderTarget.dispose(),this.pdRenderTarget.dispose(),this.normalMaterial.dispose(),this.pdMaterial.dispose(),this.copyMaterial.dispose(),this.depthRenderMaterial.dispose(),this._fsQuad.dispose()}get gtaoMap(){return this.pdRenderTarget.texture}setGBuffer(t,e){t!==void 0?(this.depthTexture=t,this.normalTexture=e,this._renderGBuffer=!1):(this.depthTexture=new Gn,this.depthTexture.format=Yn,this.depthTexture.type=Mi,this.normalRenderTarget=new we(this.width,this.height,{minFilter:Se,magFilter:Se,type:Ye,depthTexture:this.depthTexture}),this.normalTexture=this.normalRenderTarget.texture,this._renderGBuffer=!0);let n=this.normalTexture?1:0,i=this.depthTexture===this.normalTexture?"w":"x";this.gtaoMaterial.defines.NORMAL_VECTOR_TYPE=n,this.gtaoMaterial.defines.DEPTH_SWIZZLING=i,this.gtaoMaterial.uniforms.tNormal.value=this.normalTexture,this.gtaoMaterial.uniforms.tDepth.value=this.depthTexture,this.pdMaterial.defines.NORMAL_VECTOR_TYPE=n,this.pdMaterial.defines.DEPTH_SWIZZLING=i,this.pdMaterial.uniforms.tNormal.value=this.normalTexture,this.pdMaterial.uniforms.tDepth.value=this.depthTexture,this.depthRenderMaterial.uniforms.tDepth.value=this.normalRenderTarget.depthTexture}setSceneClipBox(t){t?(this.gtaoMaterial.needsUpdate=this.gtaoMaterial.defines.SCENE_CLIP_BOX!==1,this.gtaoMaterial.defines.SCENE_CLIP_BOX=1,this.gtaoMaterial.uniforms.sceneBoxMin.value.copy(t.min),this.gtaoMaterial.uniforms.sceneBoxMax.value.copy(t.max)):(this.gtaoMaterial.needsUpdate=this.gtaoMaterial.defines.SCENE_CLIP_BOX===0,this.gtaoMaterial.defines.SCENE_CLIP_BOX=0)}updateGtaoMaterial(t){t.radius!==void 0&&(this.gtaoMaterial.uniforms.radius.value=t.radius),t.distanceExponent!==void 0&&(this.gtaoMaterial.uniforms.distanceExponent.value=t.distanceExponent),t.thickness!==void 0&&(this.gtaoMaterial.uniforms.thickness.value=t.thickness),t.distanceFallOff!==void 0&&(this.gtaoMaterial.uniforms.distanceFallOff.value=t.distanceFallOff,this.gtaoMaterial.needsUpdate=!0),t.scale!==void 0&&(this.gtaoMaterial.uniforms.scale.value=t.scale),t.samples!==void 0&&t.samples!==this.gtaoMaterial.defines.SAMPLES&&(this.gtaoMaterial.defines.SAMPLES=t.samples,this.gtaoMaterial.needsUpdate=!0),t.screenSpaceRadius!==void 0&&(t.screenSpaceRadius?1:0)!==this.gtaoMaterial.defines.SCREEN_SPACE_RADIUS&&(this.gtaoMaterial.defines.SCREEN_SPACE_RADIUS=t.screenSpaceRadius?1:0,this.gtaoMaterial.needsUpdate=!0)}updatePdMaterial(t){let e=!1;t.lumaPhi!==void 0&&(this.pdMaterial.uniforms.lumaPhi.value=t.lumaPhi),t.depthPhi!==void 0&&(this.pdMaterial.uniforms.depthPhi.value=t.depthPhi),t.normalPhi!==void 0&&(this.pdMaterial.uniforms.normalPhi.value=t.normalPhi),t.radius!==void 0&&t.radius!==this.radius&&(this.pdMaterial.uniforms.radius.value=t.radius),t.radiusExponent!==void 0&&t.radiusExponent!==this.pdRadiusExponent&&(this.pdRadiusExponent=t.radiusExponent,e=!0),t.rings!==void 0&&t.rings!==this.pdRings&&(this.pdRings=t.rings,e=!0),t.samples!==void 0&&t.samples!==this.pdSamples&&(this.pdSamples=t.samples,e=!0),e&&(this.pdMaterial.defines.SAMPLES=this.pdSamples,this.pdMaterial.defines.SAMPLE_VECTORS=Pf(this.pdSamples,this.pdRings,this.pdRadiusExponent),this.pdMaterial.needsUpdate=!0)}render(t,e,n){switch(this._renderGBuffer&&(this._overrideVisibility(),this._renderOverride(t,this.normalMaterial,this.normalRenderTarget,7829503,1),this._restoreVisibility()),this.gtaoMaterial.uniforms.cameraNear.value=this.camera.near,this.gtaoMaterial.uniforms.cameraFar.value=this.camera.far,this.gtaoMaterial.uniforms.cameraProjectionMatrix.value.copy(this.camera.projectionMatrix),this.gtaoMaterial.uniforms.cameraProjectionMatrixInverse.value.copy(this.camera.projectionMatrixInverse),this.gtaoMaterial.uniforms.cameraWorldMatrix.value.copy(this.camera.matrixWorld),this._renderPass(t,this.gtaoMaterial,this.gtaoRenderTarget,16777215,1),this.pdMaterial.uniforms.cameraProjectionMatrixInverse.value.copy(this.camera.projectionMatrixInverse),this._renderPass(t,this.pdMaterial,this.pdRenderTarget,16777215,1),this.output){case s.OUTPUT.Off:break;case s.OUTPUT.Diffuse:this.copyMaterial.uniforms.tDiffuse.value=n.texture,this.copyMaterial.blending=Ce,this._renderPass(t,this.copyMaterial,this.renderToScreen?null:e);break;case s.OUTPUT.AO:this.copyMaterial.uniforms.tDiffuse.value=this.gtaoRenderTarget.texture,this.copyMaterial.blending=Ce,this._renderPass(t,this.copyMaterial,this.renderToScreen?null:e);break;case s.OUTPUT.Denoise:this.copyMaterial.uniforms.tDiffuse.value=this.pdRenderTarget.texture,this.copyMaterial.blending=Ce,this._renderPass(t,this.copyMaterial,this.renderToScreen?null:e);break;case s.OUTPUT.Depth:this.depthRenderMaterial.uniforms.cameraNear.value=this.camera.near,this.depthRenderMaterial.uniforms.cameraFar.value=this.camera.far,this._renderPass(t,this.depthRenderMaterial,this.renderToScreen?null:e);break;case s.OUTPUT.Normal:this.copyMaterial.uniforms.tDiffuse.value=this.normalRenderTarget.texture,this.copyMaterial.blending=Ce,this._renderPass(t,this.copyMaterial,this.renderToScreen?null:e);break;case s.OUTPUT.Default:this.copyMaterial.uniforms.tDiffuse.value=n.texture,this.copyMaterial.blending=Ce,this._renderPass(t,this.copyMaterial,this.renderToScreen?null:e),this.blendMaterial.uniforms.intensity.value=this.blendIntensity,this.blendMaterial.uniforms.tDiffuse.value=this.pdRenderTarget.texture,this._renderPass(t,this.blendMaterial,this.renderToScreen?null:e);break;default:console.warn("THREE.GTAOPass: Unknown output type.")}}_renderPass(t,e,n,i,r){t.getClearColor(this._originalClearColor);let a=t.getClearAlpha(),o=t.autoClear;t.setRenderTarget(n),t.autoClear=!1,i!=null&&(t.setClearColor(i),t.setClearAlpha(r||0),t.clear()),this._fsQuad.material=e,this._fsQuad.render(t),t.autoClear=o,t.setClearColor(this._originalClearColor),t.setClearAlpha(a)}_renderOverride(t,e,n,i,r){t.getClearColor(this._originalClearColor);let a=t.getClearAlpha(),o=t.autoClear;t.setRenderTarget(n),t.autoClear=!1,i=e.clearColor||i,r=e.clearAlpha||r,i!=null&&(t.setClearColor(i),t.setClearAlpha(r||0),t.clear()),this.scene.overrideMaterial=e,t.render(this.scene,this.camera),this.scene.overrideMaterial=null,t.autoClear=o,t.setClearColor(this._originalClearColor),t.setClearAlpha(a)}_overrideVisibility(){let t=this.scene,e=this._visibilityCache;t.traverse(function(n){(n.isPoints||n.isLine||n.isLine2)&&n.visible&&(n.visible=!1,e.push(n))})}_restoreVisibility(){let t=this._visibilityCache;for(let e=0;e<t.length;e++)t[e].visible=!0;t.length=0}_generateNoise(t=64){let e=new yu,n=t*t*4,i=new Uint8Array(n);for(let a=0;a<t;a++)for(let o=0;o<t;o++){let l=a,c=o;i[(a*t+o)*4]=(e.noise(l,c)*.5+.5)*255,i[(a*t+o)*4+1]=(e.noise(l+t,c)*.5+.5)*255,i[(a*t+o)*4+2]=(e.noise(l,c+t)*.5+.5)*255,i[(a*t+o)*4+3]=(e.noise(l+t,c+t)*.5+.5)*255}let r=new Be(i,t,t,He,qe);return r.wrapS=wn,r.wrapT=wn,r.needsUpdate=!0,r}};Xl.OUTPUT={Off:-1,Default:0,Diffuse:1,Depth:2,Normal:3,AO:4,Denoise:5};var ql={name:"OutputShader",uniforms:{tDiffuse:{value:null},toneMappingExposure:{value:1}},vertexShader:`
+		precision highp float;
+
+		uniform mat4 modelViewMatrix;
+		uniform mat4 projectionMatrix;
+
+		attribute vec3 position;
+		attribute vec2 uv;
+
+		varying vec2 vUv;
+
+		void main() {
+
+			vUv = uv;
+			gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+
+		}`,fragmentShader:`
+
+		precision highp float;
+
+		uniform sampler2D tDiffuse;
+
+		#include <tonemapping_pars_fragment>
+		#include <colorspace_pars_fragment>
+
+		varying vec2 vUv;
+
+		void main() {
+
+			gl_FragColor = texture2D( tDiffuse, vUv );
+
+			// tone mapping
+
+			#ifdef LINEAR_TONE_MAPPING
+
+				gl_FragColor.rgb = LinearToneMapping( gl_FragColor.rgb );
+
+			#elif defined( REINHARD_TONE_MAPPING )
+
+				gl_FragColor.rgb = ReinhardToneMapping( gl_FragColor.rgb );
+
+			#elif defined( CINEON_TONE_MAPPING )
+
+				gl_FragColor.rgb = CineonToneMapping( gl_FragColor.rgb );
+
+			#elif defined( ACES_FILMIC_TONE_MAPPING )
+
+				gl_FragColor.rgb = ACESFilmicToneMapping( gl_FragColor.rgb );
+
+			#elif defined( AGX_TONE_MAPPING )
+
+				gl_FragColor.rgb = AgXToneMapping( gl_FragColor.rgb );
+
+			#elif defined( NEUTRAL_TONE_MAPPING )
+
+				gl_FragColor.rgb = NeutralToneMapping( gl_FragColor.rgb );
+
+			#elif defined( CUSTOM_TONE_MAPPING )
+
+				gl_FragColor.rgb = CustomToneMapping( gl_FragColor.rgb );
+
+			#endif
+
+			// color space
+
+			#ifdef SRGB_TRANSFER
+
+				gl_FragColor = sRGBTransferOETF( gl_FragColor );
+
+			#endif
+
+		}`};var Su=class extends Mn{constructor(){super(),this.isOutputPass=!0,this.uniforms=Sn.clone(ql.uniforms),this.material=new Gi({name:ql.name,uniforms:this.uniforms,vertexShader:ql.vertexShader,fragmentShader:ql.fragmentShader}),this._fsQuad=new qi(this.material),this._outputColorSpace=null,this._toneMapping=null}render(t,e,n){this.uniforms.tDiffuse.value=n.texture,this.uniforms.toneMappingExposure.value=t.toneMappingExposure,(this._outputColorSpace!==t.outputColorSpace||this._toneMapping!==t.toneMapping)&&(this._outputColorSpace=t.outputColorSpace,this._toneMapping=t.toneMapping,this.material.defines={},te.getTransfer(this._outputColorSpace)===oe&&(this.material.defines.SRGB_TRANSFER=""),this._toneMapping===kr?this.material.defines.LINEAR_TONE_MAPPING="":this._toneMapping===Gr?this.material.defines.REINHARD_TONE_MAPPING="":this._toneMapping===Hr?this.material.defines.CINEON_TONE_MAPPING="":this._toneMapping===Wr?this.material.defines.ACES_FILMIC_TONE_MAPPING="":this._toneMapping===qr?this.material.defines.AGX_TONE_MAPPING="":this._toneMapping===Yr?this.material.defines.NEUTRAL_TONE_MAPPING="":this._toneMapping===Xr&&(this.material.defines.CUSTOM_TONE_MAPPING=""),this.material.needsUpdate=!0),this.renderToScreen===!0?(t.setRenderTarget(null),this._fsQuad.render(t)):(t.setRenderTarget(e),this.clear&&t.clear(t.autoClearColor,t.autoClearDepth,t.autoClearStencil),this._fsQuad.render(t))}dispose(){this.material.dispose(),this._fsQuad.dispose()}};window.JR3D={THREE:Af,OrbitControls:pu,EffectComposer:_u,RenderPass:xu,GTAOPass:Xl,OutputPass:Su};})();
